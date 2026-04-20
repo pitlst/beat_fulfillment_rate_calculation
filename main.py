@@ -101,7 +101,7 @@ def process_row(row: pd.Series) -> pd.Series:
     })
 
 def process_batch(rows: pd.DataFrame) -> pd.DataFrame:
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         futures = [executor.submit(process_row, row) for _, row in rows.iterrows()]
         results = [f.result() for f in futures]
     return pd.DataFrame(results)
