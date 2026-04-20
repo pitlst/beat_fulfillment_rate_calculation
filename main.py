@@ -7,6 +7,9 @@ import datetime
 import pandas as pd
 import time
 from functools import lru_cache
+import warnings
+
+warnings.simplefilter("ignore", FutureWarning)
 
 _client = None
 
