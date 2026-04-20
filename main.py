@@ -7,149 +7,158 @@ import pandas as pd
 import time
 import warnings
 import traceback
-from async_lru import alru_cache
+from functools import lru_cache  # 改用标准库 lru_cache，不需要 async 版
 from tqdm import tqdm
+import concurrent.futures  # 引入线程池
 
 warnings.simplefilter("ignore", FutureWarning)
 
-def normalize_datetime(dt: datetime.datetime) -> datetime.datetime:
-    if dt.tzinfo is not None:
-        # 先转 UTC（或你需要的时区），再去掉时区
-        return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-    return dt
+DAILY_PERIODS = [(8, 0, 12, 0), (13, 30, 17, 30)]  # 提到模块级，避免重复构造
 
 _client = None
 
-
 async def get_client() -> clickhouse_connect.driver.asyncclient.AsyncClient:
-    """根据参数创建 ClickHouse 客户端."""
     global _client
     if _client is None:
-        pool_mgr = httputil.get_pool_manager(
-            maxsize=32,
-            num_pools=2,
-            block=True,
-            timeout=300
-        )
+        pool_mgr = httputil.get_pool_manager(maxsize=32, num_pools=2, block=True, timeout=300)
         _client = await clickhouse_connect.get_async_client(
-            host="10.24.5.59",
-            port=8123,
-            username="cheakf",
-            password="Swq8855830.",
-            database="default",
-            pool_mgr=pool_mgr
+            host="10.24.5.59", port=8123, username="cheakf", password="Swq8855830.",
+            database="default", pool_mgr=pool_mgr
         )
     return _client
 
+def normalize_datetime(dt: datetime.datetime) -> datetime.datetime:
+    if dt.tzinfo is not None:
+        return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return dt
+
+# ========== 核心改动：全部改为同步函数，去掉 async/await 开销 ==========
+
+def is_workday(d: datetime.date, workday_cache: dict) -> bool:
+    """纯内存判断，无需 async"""
+    if d in workday_cache:
+        return workday_cache[d]
+    return d.weekday() < 5
+
+@lru_cache(maxsize=8192)  # 缓存加大，因为日期组合有限
+def get_worktime(start_time: datetime.datetime, end_time: datetime.datetime) -> int:
+    """纯 CPU 计算，改为同步，使用标准 lru_cache"""
+    start_time = normalize_datetime(start_time)
+    end_time = normalize_datetime(end_time)
+    reverse = False
+    if start_time >= end_time:
+        reverse = True
+        end_time, start_time = start_time, end_time
+    
+    total_seconds = 0
+    current_date = start_time.date()
+    end_date = end_time.date()
+    
+    while current_date <= end_date:
+        if is_workday(current_date, _WORKDAY_CACHE):  # 使用模块级缓存
+            for sh, sm, eh, em in DAILY_PERIODS:
+                period_start = datetime.datetime.combine(current_date, datetime.time(sh, sm))
+                period_end = datetime.datetime.combine(current_date, datetime.time(eh, em))
+                intersect_start = max(start_time, period_start)
+                intersect_end = min(end_time, period_end)
+                if intersect_start < intersect_end:
+                    total_seconds += (intersect_end - intersect_start).total_seconds()
+        current_date += datetime.timedelta(days=1)
+    
+    return int(total_seconds // 60) if not reverse else -int(total_seconds // 60)
+
+def process_row(row: pd.Series) -> pd.Series:
+    """改为纯同步函数"""
+    schedule_time = get_worktime(pd.to_datetime(row["排程开始时间"]), pd.to_datetime(row["排程结束时间"]))
+    plan_time = get_worktime(pd.to_datetime(row["计划开始时间"]), pd.to_datetime(row["计划结束时间"]))
+    
+    if row["当前工序状态"] != '已完工':
+        actual_time = -1
+    else:
+        actual_time = get_worktime(pd.to_datetime(row["实际开始时间"]), pd.to_datetime(row["实际结束时间"]))
+    
+    if actual_time == -1:
+        fulfill = '工序未完工'
+    elif actual_time <= schedule_time:
+        fulfill = '是'
+    else:
+        fulfill = '否'
+    
+    if actual_time == -1:
+        on_time = '工序未完工'
+    elif (abs(get_worktime(pd.to_datetime(row["计划开始时间"]), pd.to_datetime(row["实际开始时间"]))) <= 240 and
+          abs(get_worktime(pd.to_datetime(row["计划结束时间"]), pd.to_datetime(row["实际结束时间"]))) <= 240):
+        on_time = '是'
+    else:
+        on_time = '否'
+    
+    return pd.Series({
+        "排程执行时间": schedule_time,
+        "计划执行时间": plan_time,
+        "实际执行时间": actual_time,
+        "是否兑现节拍": fulfill,
+        "是否准时开完工": on_time
+    })
+
+def process_batch(rows: pd.DataFrame) -> pd.DataFrame:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(process_row, row) for _, row in rows.iterrows()]
+        results = [f.result() for f in futures]
+    return pd.DataFrame(results)
+
+# 模块级变量，用于跨函数共享（进程池方案需要，这里先准备好）
+_WORKDAY_CACHE = {}
 
 async def main_one():
+    global _WORKDAY_CACHE
     client = await get_client()
-    holiday_df = await client.query_df(
-        f"""
-SELECT 
-    toDate("节假日日期") as d, 
-    "是否休息" as is_rest 
-FROM ods.attendance_kq_scheduling_holiday
-    WHERE Deleted = 0 
-    QUALIFY row_number() OVER (PARTITION BY zid ORDER BY Version DESC) = 1
-        """
-    )
-    workday_cache: dict[datetime.datetime, bool] = {}
-    for _, row in holiday_df.iterrows():
-        workday_cache[row['d']] = not bool(row['is_rest'])
-
-    async def is_workday(input_value: datetime.datetime) -> bool:
-        '''获取是否是工作日'''
-        if input_value in workday_cache:
-            return workday_cache[input_value]
-        return input_value.weekday() < 5
-
-    @alru_cache(maxsize=1024)
-    async def get_worktime(start_time: datetime.datetime, end_time: datetime.datetime) -> int:
-        '''获取工作时间，结果为分钟'''
-        start_time = normalize_datetime(start_time)
-        end_time = normalize_datetime(end_time)
-        reverse = False
-        if start_time >= end_time:
-            reverse = True
-            end_time, start_time = start_time, end_time
-        total_seconds = 0
-        current_date = start_time.date()
-        end_date = end_time.date()
-        # 每天的工作时段配置：(开始小时, 开始分钟, 结束小时, 结束分钟)
-        daily_periods: list[tuple[int, int, int, int]] = [
-            (8, 0, 12, 0),    # 上午 8:00 - 12:00
-            (13, 30, 17, 30)  # 下午 13:30 - 17:30
-        ]
-        while current_date <= end_date:
-            # 构造当天的 datetime 用于判断是否为工作日
-            check_dt = datetime.datetime.combine(current_date, datetime.time.min)
-            if await is_workday(check_dt):
-                for sh, sm, eh, em in daily_periods:
-                    period_start = datetime.datetime.combine(current_date, datetime.time(sh, sm))
-                    period_end = datetime.datetime.combine(current_date, datetime.time(eh, em))
-                    intersect_start = max(start_time, period_start)
-                    intersect_end = min(end_time, period_end)
-                    if intersect_start < intersect_end:
-                        total_seconds += (intersect_end - intersect_start).total_seconds()
-            current_date += datetime.timedelta(days=1)
-        return int(total_seconds // 60) if not reverse else -int(total_seconds // 60)
-
-    total_data = await client.query_df(f"SELECT * FROM dwd.process_cycle_time")
-    print(f"获取到{len(total_data)}条数据")
-
-    async def process_row(row: pd.Series):
-        schedule_time = await get_worktime(pd.to_datetime(row["排程开始时间"]), pd.to_datetime(row["排程结束时间"]))
-        plan_time = await get_worktime(pd.to_datetime(row["计划开始时间"]), pd.to_datetime(row["计划结束时间"]))
-        actual_time = -1 if row["当前工序状态"] != '已完工' else await get_worktime(pd.to_datetime(row["实际开始时间"]), pd.to_datetime(row["实际结束时间"]))
-        if actual_time != -1:
-            fulfill = '工序未完工'
-        elif actual_time <= schedule_time:
-            fulfill = '是'
-        else:
-            fulfill = '否'
-        if actual_time != -1:
-            on_time = '工序未完工'
-        elif abs(await get_worktime(pd.to_datetime(row["计划开始时间"]), pd.to_datetime(row["实际开始时间"]))) <= 240 and abs(await get_worktime(pd.to_datetime(row["计划结束时间"]), pd.to_datetime(row["实际结束时间"]))) <= 240:
-            on_time = '是'
-        else:
-            on_time = '否'
-        return pd.Series({
-            "排程执行时间": schedule_time,
-            "计划执行时间": plan_time,
-            "实际执行时间": actual_time,
-            "是否兑现节拍": fulfill,
-            "是否准时开完工": on_time
-        })
-    async def process_batch(rows: pd.DataFrame):
-        tasks = [process_row(row) for _, row in rows.iterrows()]
-        results = await asyncio.gather(*tasks)
-        return pd.concat(results, axis=0)
     
-    batch_size = 500  # 每批 500 条
+    # 1. 预加载节假日（保持 async IO）
+    holiday_df = await client.query_df("""
+        SELECT toDate("节假日日期") as d, "是否休息" as is_rest 
+        FROM ods.attendance_kq_scheduling_holiday
+        WHERE Deleted = 0 
+        QUALIFY row_number() OVER (PARTITION BY zid ORDER BY Version DESC) = 1
+    """)
+    _WORKDAY_CACHE.clear()
+    for _, row in holiday_df.iterrows():
+        _WORKDAY_CACHE[row['d']] = not bool(row['is_rest'])
+    
+    # 2. 加载主数据
+    total_data = await client.query_df("SELECT * FROM dwd.process_cycle_time")
+    print(f"获取到 {len(total_data)} 条数据")
+    
+    # 3. 分批 + 线程池处理
+    batch_size = 500
     all_results = []
-    for i in tqdm(range(0, len(total_data), batch_size), desc="处理批次"):
-        batch = total_data.iloc[i:i+batch_size]
-        result = await process_batch(batch)
-        all_results.append(result)
-        await asyncio.sleep(0.5)
+    
+    with tqdm(total=len(total_data), desc="计算节拍兑现率", unit="条") as pbar:
+        for i in range(0, len(total_data), batch_size):
+            batch = total_data.iloc[i:i+batch_size]
+            # 把 CPU 密集型 batch 计算丢进线程池，不阻塞事件循环
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,  # 使用默认 ThreadPoolExecutor
+                process_batch,
+                batch
+            )
+            all_results.append(result)
+            pbar.update(len(batch))
+    
+    # 4. 写回数据库
     res_new_df = pd.concat(all_results, axis=0)
     res_df = pd.concat([res_new_df, total_data], axis=1)
     await client.command("DROP TABLE IF EXISTS dwd.beat_fulfillment_rate")
     await client.insert_df("beat_fulfillment_rate", res_df, "dwd")
 
-
 async def main():
     while True:
-        print(f"[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] 节拍兑现率开始计算")
+        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 节拍兑现率开始计算")
         try:
             await main_one()
         except Exception:
-            print(f"[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] error:{traceback.format_exc()}")
-        # 等待1分钟
-        print(f"[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] 节拍兑现率计算完成，等待1分钟......")
+            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] error:{traceback.format_exc()}")
+        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 节拍兑现率计算完成，等待1分钟......")
         time.sleep(60)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
