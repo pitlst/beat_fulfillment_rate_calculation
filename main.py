@@ -6,8 +6,8 @@ from clickhouse_connect.driver import httputil
 import datetime
 import pandas as pd
 import time
-from functools import lru_cache
 import warnings
+from async_lru import alru_cache
 
 warnings.simplefilter("ignore", FutureWarning)
 
@@ -38,7 +38,7 @@ async def get_client() -> clickhouse_connect.driver.asyncclient.AsyncClient:
 async def main_one():
     client = await get_client()
 
-    @lru_cache(maxsize=1024)
+    @alru_cache(maxsize=1024)
     async def is_workday(input_value: datetime.datetime) -> bool:
         '''获取是否是工作日'''
         res = await client.query_df(
@@ -66,7 +66,7 @@ WHERE toDate(bill."节假日日期") = '{input_value.year}-{input_value.month}-{
             return False
         return True
 
-    @lru_cache(maxsize=1024)
+    @alru_cache(maxsize=1024)
     async def get_worktime(start_time: datetime.datetime, end_time: datetime.datetime) -> int:
         '''获取工作时间，结果为分钟'''
         reverse = False
@@ -99,23 +99,30 @@ WHERE toDate(bill."节假日日期") = '{input_value.year}-{input_value.month}-{
     print(f"获取到{len(total_data)}条数据")
 
     async def process_row(row: pd.Series):
-        row["排程执行时间"] = await get_worktime(pd.to_datetime(row["排程开始时间"]), pd.to_datetime(row["排程结束时间"]))
-        row["计划执行时间"] = await get_worktime(pd.to_datetime(row["计划开始时间"]), pd.to_datetime(row["计划结束时间"]))
-        row["实际执行时间"] = -1 if row["当前工序状态"] != '已完工' else await get_worktime(pd.to_datetime(row["实际开始时间"]), pd.to_datetime(row["实际结束时间"]))
-        if row["实际执行时间"] != -1:
-            row["是否兑现节拍"] = '工序未完工'
-        elif row["实际执行时间"] <= row["排程执行时间"]:
-            row["是否兑现节拍"] = '是'
+        schedule_time = await get_worktime(pd.to_datetime(row["排程开始时间"]), pd.to_datetime(row["排程结束时间"]))
+        plan_time = await get_worktime(pd.to_datetime(row["计划开始时间"]), pd.to_datetime(row["计划结束时间"]))
+        actual_time = -1 if row["当前工序状态"] != '已完工' else await get_worktime(pd.to_datetime(row["实际开始时间"]), pd.to_datetime(row["实际结束时间"]))
+        if actual_time != -1:
+            fulfill = '工序未完工'
+        elif actual_time <= schedule_time:
+            fulfill = '是'
         else:
-            row["是否兑现节拍"] = '否'
-        if row["实际执行时间"] != -1:
-            row["是否准时开完工"] = '工序未完工'
+            fulfill = '否'
+        if actual_time != -1:
+            on_time = '工序未完工'
         elif abs(await get_worktime(pd.to_datetime(row["计划开始时间"]), pd.to_datetime(row["实际开始时间"]))) <= 240 and abs(await get_worktime(pd.to_datetime(row["计划结束时间"]), pd.to_datetime(row["实际结束时间"]))) <= 240:
-            row["是否准时开完工"] = '是'
+            on_time = '是'
         else:
-            row["是否准时开完工"] = '否'
-        return row
-    res_df = pd.concat(await asyncio.gather(*[process_row(row) for _, row in total_data.iterrows()]), axis=0)
+            on_time = '否'
+        return pd.Series({
+            "排程执行时间": schedule_time,
+            "计划执行时间": plan_time,
+            "实际执行时间": actual_time,
+            "是否兑现节拍": fulfill,
+            "是否准时开完工": on_time
+        })
+    res_new_df = pd.concat(await asyncio.gather(*[process_row(row) for _, row in total_data.iterrows()]), axis=0)
+    res_df = pd.concat([res_new_df, total_data], axis=1)
     await client.command("DROP TABLE IF EXISTS dwd.beat_fulfillment_rate")
     await client.insert_df("beat_fulfillment_rate", res_df, "dwd")
 

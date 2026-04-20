@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "async-lru>=2.3.0",
     "clickhouse-connect>=0.15.1",
     "pandas>=3.0.2",
     "tqdm>=4.67.3",
