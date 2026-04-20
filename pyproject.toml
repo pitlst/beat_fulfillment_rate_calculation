@@ -8,3 +8,7 @@ dependencies = [
     "clickhouse-connect>=0.15.1",
     "pandas>=3.0.2",
 ]
+# 部署到内网后想要更新依赖需要解除以下注释
+# [[tool.uv.index]]
+# url = "http://10.29.1.242:3003/pip/simple"
+# default = true
