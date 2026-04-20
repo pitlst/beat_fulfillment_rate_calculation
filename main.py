@@ -81,7 +81,7 @@ WHERE toDate(bill."节假日日期") = '{input_value.year}-{input_value.month}-{
         while current_date <= end_date:
             # 构造当天的 datetime 用于判断是否为工作日
             check_dt = datetime.datetime.combine(current_date, datetime.time.min)
-            if await is_workday(client, check_dt):
+            if await is_workday(check_dt):
                 for sh, sm, eh, em in daily_periods:
                     period_start = datetime.datetime.combine(current_date, datetime.time(sh, sm))
                     period_end = datetime.datetime.combine(current_date, datetime.time(eh, em))
@@ -93,6 +93,7 @@ WHERE toDate(bill."节假日日期") = '{input_value.year}-{input_value.month}-{
         return int(total_seconds // 60) if not reverse else -int(total_seconds // 60)
 
     total_data = await client.query_df(f"SELECT * FROM dwd.process_cycle_time")
+    print(f"获取到{len(total_data)}条数据")
 
     async def process_row(row: pd.Series):
         row["排程执行时间"] = await get_worktime(pd.to_datetime(row["排程开始时间"]), pd.to_datetime(row["排程结束时间"]))
