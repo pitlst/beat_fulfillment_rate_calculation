@@ -16,7 +16,7 @@ warnings.simplefilter("ignore", FutureWarning)
 DAILY_PERIODS = [(8, 0, 12, 0), (13, 30, 17, 30)]  # 提到模块级，避免重复构造
 
 
-def get_clickhouse_type(dtype: pd.api.extensions.DtypeObj) -> str:  # type: ignore
+def get_clickhouse_type(dtype) -> str:  # type: ignore
     """根据 pandas dtype 推断 ClickHouse 类型"""
     if pd.api.types.is_integer_dtype(dtype):
         return 'Int64'
