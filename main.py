@@ -7,6 +7,7 @@ import datetime
 import pandas as pd
 import time
 import warnings
+import traceback
 from async_lru import alru_cache
 
 warnings.simplefilter("ignore", FutureWarning)
@@ -143,8 +144,8 @@ async def main():
         print(f"[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] 节拍兑现率开始计算")
         try:
             await main_one()
-        except Exception as e:
-            print(f"[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] error:{str(e)}")
+        except Exception:
+            print(f"[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] error:{traceback.format_exc()}")
         # 等待1分钟
         print(f"[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] 节拍兑现率计算完成，等待1分钟......")
         time.sleep(60)
