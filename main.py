@@ -123,9 +123,9 @@ async def main():
         try:
             await main_one()
         except Exception as e:
-            print(f"[{[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}]}] {str(e)}")
+            print(f"[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] {str(e)}")
         # 等待1分钟
-        print(f"[{[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}]}] 节拍兑现率计算完成，等待1分钟......")
+        print(f"[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] 节拍兑现率计算完成，等待1分钟......")
         time.sleep(60)
 
 
