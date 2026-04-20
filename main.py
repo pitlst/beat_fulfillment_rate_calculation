@@ -1,5 +1,4 @@
 import asyncio
-
 import clickhouse_connect
 import clickhouse_connect.driver.asyncclient
 from clickhouse_connect.driver import httputil
@@ -9,6 +8,7 @@ import time
 import warnings
 import traceback
 from async_lru import alru_cache
+import tqdm
 
 warnings.simplefilter("ignore", FutureWarning)
 
@@ -17,8 +17,6 @@ def normalize_datetime(dt: datetime.datetime) -> datetime.datetime:
         # 先转 UTC（或你需要的时区），再去掉时区
         return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
     return dt
-
-semaphore = asyncio.Semaphore(8)
 
 _client = None
 
@@ -30,8 +28,8 @@ async def get_client() -> clickhouse_connect.driver.asyncclient.AsyncClient:
         pool_mgr = httputil.get_pool_manager(
             maxsize=32,
             num_pools=2,
-            block=False,  # 关键：池满时不丢弃连接，而是新建临时连接
-            timeout=150
+            block=True,
+            timeout=300
         )
         _client = await clickhouse_connect.get_async_client(
             host="10.24.5.59",
@@ -46,35 +44,25 @@ async def get_client() -> clickhouse_connect.driver.asyncclient.AsyncClient:
 
 async def main_one():
     client = await get_client()
+    holiday_df = await client.query_df(
+        f"""
+SELECT 
+    toDate("节假日日期") as d, 
+    "是否休息" as is_rest 
+FROM ods.attendance_kq_scheduling_holiday
+    WHERE Deleted = 0 
+    QUALIFY row_number() OVER (PARTITION BY zid ORDER BY Version DESC) = 1
+        """
+    )
+    workday_cache: dict[datetime.datetime, bool] = {}
+    for _, row in holiday_df.iterrows():
+        workday_cache[row['d']] = not bool(row['is_rest'])
 
-    @alru_cache(maxsize=1024)
     async def is_workday(input_value: datetime.datetime) -> bool:
         '''获取是否是工作日'''
-        async with semaphore:
-            res = await client.query_df(
-                f"""
-SELECT 
-    bill."是否休息" AS "is_rest"
-FROM (
-    SELECT
-        *
-    FROM
-        ods.attendance_kq_scheduling_holiday
-    WHERE
-        Deleted = 0 QUALIFY row_number() OVER (
-            PARTITION BY
-                zid
-            ORDER BY
-                Version DESC
-        ) = 1
-) AS bill
-WHERE toDate(bill."节假日日期") = '{input_value.year}-{input_value.month}-{input_value.day}'
-                """)
-        if len(res) > 0:
-            return not bool(res["is_rest"][0])
-        if input_value.weekday() >= 5:
-            return False
-        return True
+        if input_value in workday_cache:
+            return workday_cache[input_value]
+        return input_value.weekday() < 5
 
     @alru_cache(maxsize=1024)
     async def get_worktime(start_time: datetime.datetime, end_time: datetime.datetime) -> int:
@@ -133,7 +121,19 @@ WHERE toDate(bill."节假日日期") = '{input_value.year}-{input_value.month}-{
             "是否兑现节拍": fulfill,
             "是否准时开完工": on_time
         })
-    res_new_df = pd.concat(await asyncio.gather(*[process_row(row) for _, row in total_data.iterrows()]), axis=0)
+    async def process_batch(rows: pd.DataFrame):
+        tasks = [process_row(row) for _, row in rows.iterrows()]
+        results = await asyncio.gather(*tasks)
+        return pd.concat(results, axis=0)
+    
+    batch_size = 500  # 每批 500 条
+    all_results = []
+    for i in tqdm.tgrange(0, len(total_data), batch_size):
+        batch = total_data.iloc[i:i+batch_size]
+        result = await process_batch(batch)
+        all_results.append(result)
+        await asyncio.sleep(0.5)
+    res_new_df = pd.concat(all_results, axis=0)
     res_df = pd.concat([res_new_df, total_data], axis=1)
     await client.command("DROP TABLE IF EXISTS dwd.beat_fulfillment_rate")
     await client.insert_df("beat_fulfillment_rate", res_df, "dwd")
