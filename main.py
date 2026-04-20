@@ -17,6 +17,8 @@ def normalize_datetime(dt: datetime.datetime) -> datetime.datetime:
         return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
     return dt
 
+semaphore = asyncio.Semaphore(8)
+
 _client = None
 
 
@@ -47,8 +49,9 @@ async def main_one():
     @alru_cache(maxsize=1024)
     async def is_workday(input_value: datetime.datetime) -> bool:
         '''获取是否是工作日'''
-        res = await client.query_df(
-            f"""
+        async with semaphore:
+            res = await client.query_df(
+                f"""
 SELECT 
     bill."是否休息" AS "is_rest"
 FROM (
@@ -65,7 +68,7 @@ FROM (
         ) = 1
 ) AS bill
 WHERE toDate(bill."节假日日期") = '{input_value.year}-{input_value.month}-{input_value.day}'
-            """)
+                """)
         if len(res) > 0:
             return not bool(res["is_rest"][0])
         if input_value.weekday() >= 5:
