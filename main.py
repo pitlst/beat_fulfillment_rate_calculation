@@ -25,7 +25,7 @@ def get_clickhouse_type(dtype) -> str:  # type: ignore
     if pd.api.types.is_bool_dtype(dtype):
         return 'UInt8'  # ClickHouse 中常用 UInt8 表示布尔
     if pd.api.types.is_datetime64_any_dtype(dtype):
-        return 'DateTime64'
+        return 'DateTime64(6)'
     # 默认字符串，能兼容中文、混合类型等
     return 'String'
 
