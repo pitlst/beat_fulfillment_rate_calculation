@@ -8,7 +8,7 @@ import time
 import warnings
 import traceback
 from async_lru import alru_cache
-import tqdm
+from tqdm import tqdm
 
 warnings.simplefilter("ignore", FutureWarning)
 
@@ -128,7 +128,7 @@ FROM ods.attendance_kq_scheduling_holiday
     
     batch_size = 500  # 每批 500 条
     all_results = []
-    for i in tqdm.tgrange(0, len(total_data), batch_size):
+    for i in tqdm(range(0, len(total_data), batch_size), desc="处理批次"):
         batch = total_data.iloc[i:i+batch_size]
         result = await process_batch(batch)
         all_results.append(result)
