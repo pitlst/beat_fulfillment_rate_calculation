@@ -11,6 +11,12 @@ from async_lru import alru_cache
 
 warnings.simplefilter("ignore", FutureWarning)
 
+def normalize_datetime(dt: datetime.datetime) -> datetime.datetime:
+    if dt.tzinfo is not None:
+        # 先转 UTC（或你需要的时区），再去掉时区
+        return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return dt
+
 _client = None
 
 
@@ -69,6 +75,8 @@ WHERE toDate(bill."节假日日期") = '{input_value.year}-{input_value.month}-{
     @alru_cache(maxsize=1024)
     async def get_worktime(start_time: datetime.datetime, end_time: datetime.datetime) -> int:
         '''获取工作时间，结果为分钟'''
+        start_time = normalize_datetime(start_time)
+        end_time = normalize_datetime(end_time)
         reverse = False
         if start_time >= end_time:
             reverse = True
