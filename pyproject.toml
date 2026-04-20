@@ -1,0 +1,10 @@
+[project]
+name = "beat-fulfillment-rate-calculation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "clickhouse-connect>=0.15.1",
+    "pandas>=3.0.2",
+]
