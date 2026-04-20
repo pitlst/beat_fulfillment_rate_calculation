@@ -15,6 +15,45 @@ warnings.simplefilter("ignore", FutureWarning)
 
 DAILY_PERIODS = [(8, 0, 12, 0), (13, 30, 17, 30)]  # 提到模块级，避免重复构造
 
+
+def get_clickhouse_type(dtype: pd.api.extensions.DtypeObj) -> str:  # type: ignore
+    """根据 pandas dtype 推断 ClickHouse 类型"""
+    if pd.api.types.is_integer_dtype(dtype):
+        return 'Int64'
+    if pd.api.types.is_float_dtype(dtype):
+        return 'Float64'
+    if pd.api.types.is_bool_dtype(dtype):
+        return 'UInt8'  # ClickHouse 中常用 UInt8 表示布尔
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        return 'DateTime64'
+    # 默认字符串，能兼容中文、混合类型等
+    return 'String'
+
+
+async def create_table_from_df(
+    client,
+    df: pd.DataFrame,
+    table_name: str,
+    database: str = "default"
+):
+    """根据 DataFrame 自动生成并执行 CREATE TABLE"""
+    columns_def = []
+    for col_name, dtype in df.dtypes.items():
+        ch_type = get_clickhouse_type(dtype)
+        # 中文/特殊列名用双引号包裹，避免 ClickHouse 解析错误
+        safe_col = f'"{col_name}"'
+        columns_def.append(f"    {safe_col} {ch_type}")
+
+    # 如果列很多，用 tuple() 作为 ORDER BY（无排序键）
+    # 如果有合适的列（如 ID、时间），可以改成 ORDER BY ("xxx")
+    sql = f"""CREATE TABLE IF NOT EXISTS {database}.{table_name} (
+{',\n'.join(columns_def)}
+) ENGINE = MergeTree()
+ORDER BY tuple()
+"""
+    await client.command(sql)
+    print(f"已确保表存在: {database}.{table_name} ({len(df.columns)} 列)")
+
 _client = None
 
 
@@ -159,6 +198,7 @@ async def main_one():
     res_df = pd.concat([res_new_df, total_data], axis=1)
 
     await client.command("DROP TABLE IF EXISTS dwd.beat_fulfillment_rate")
+    await create_table_from_df(client, res_df, "beat_fulfillment_rate", "dwd")
     await client.insert_df("beat_fulfillment_rate", res_df, "dwd")
 
 
